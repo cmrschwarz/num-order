@@ -53,6 +53,24 @@ macro_rules! impl_ord_by_casting {
     )*);
 }
 
+#[allow(unused_macros)]
+macro_rules! impl_ord_by_promotion {
+    ($($small:ty => $promoted:ty : $big:ty;)*) => ($(
+        impl NumOrd<$small> for $big {
+            #[inline]
+            fn num_partial_cmp(&self, other: &$small) -> Option<Ordering> {
+                self.num_partial_cmp(&<$promoted>::from(*other))
+            }
+        }
+        impl NumOrd<$big> for $small {
+            #[inline]
+            fn num_partial_cmp(&self, other: &$big) -> Option<Ordering> {
+                <$promoted>::from(*self).num_partial_cmp(other)
+            }
+        }
+    )*);
+}
+
 impl_ord_by_casting! {
     // uN, uM for N < M
     u8  => u128; u8  => u64; u8  => u32; u8 => u16;
@@ -233,21 +251,107 @@ impl_ord_with_size_types!(u8 u16 u32 u64 u128 i8 i16 i32 i64 i128 f32 f64);
 #[cfg(feature = "num-bigint")]
 mod _num_bigint {
     use super::*;
-    use num_bigint::{BigInt, BigUint};
+    use num_bigint::{BigInt, BigUint, Sign};
     use num_traits::{FromPrimitive, Signed};
-
     impl_ord_equal_types!(BigInt BigUint);
+    impl_ord_by_promotion! {
+        u8 => u64 : BigUint; u16 => u64 : BigUint; u32 => u64 : BigUint;
+        i8 => i64 : BigUint; i16 => i64 : BigUint; i32 => i64 : BigUint;
+        u8 => u64 : BigInt; u16 => u64 : BigInt; u32 => u64 : BigInt;
+        i8 => i64 : BigInt; i16 => i64 : BigInt; i32 => i64 : BigInt;
+    }
     impl_ord_by_casting! {
-        u8 => BigUint; u16 => BigUint; u32 => BigUint; u64 => BigUint; u128 => BigUint;
-        i8 => BigInt; i16 => BigInt; i32 => BigInt; i64 => BigInt; i128 => BigInt;
-        u8 => BigInt; u16 => BigInt; u32 => BigInt; u64 => BigInt; u128 => BigInt;
+        u128 => BigUint;
+        i128 => BigInt;
+        u128 => BigInt;
     }
     impl_ord_between_diff_sign! {
-        i8 => BigUint; i16 => BigUint; i32 => BigUint; i64 => BigUint; i128 => BigUint;
+        i128 => BigUint;
     }
-    impl_ord_with_size_types! (BigInt BigUint);
+    impl_ord_with_size_types!(BigInt BigUint);
 
     // specialized implementations
+    impl NumOrd<u64> for BigUint {
+        fn num_cmp(&self, other: &u64) -> Ordering {
+            if self.bits() > 64 {
+                return Ordering::Greater;
+            }
+            let v = self.iter_u64_digits().next().unwrap_or(0);
+            v.cmp(other)
+        }
+        fn num_partial_cmp(&self, other: &u64) -> Option<Ordering> {
+            Some(self.num_cmp(other))
+        }
+    }
+    impl NumOrd<i64> for BigUint {
+        fn num_cmp(&self, other: &i64) -> Ordering {
+            if *other < 0 {
+                return Ordering::Greater;
+            }
+            if self.bits() >= 64 {
+                return Ordering::Greater;
+            }
+            let v = self.iter_u64_digits().next().unwrap_or(0);
+            v.cmp(&(*other as u64))
+        }
+        fn num_partial_cmp(&self, other: &i64) -> Option<Ordering> {
+            Some(self.num_cmp(other))
+        }
+    }
+    impl NumOrd<u64> for BigInt {
+        fn num_cmp(&self, other: &u64) -> Ordering {
+            if self.is_negative() {
+                return Ordering::Less;
+            }
+            self.magnitude().num_cmp(other)
+        }
+        fn num_partial_cmp(&self, other: &u64) -> Option<Ordering> {
+            Some(self.num_cmp(other))
+        }
+    }
+    impl NumOrd<i64> for BigInt {
+        fn num_cmp(&self, other: &i64) -> Ordering {
+            // fast path for difffering signs
+            match self.sign() {
+                Sign::Minus => {
+                    // -self < +other
+                    if *other >= 0 {
+                        return Ordering::Less;
+                    }
+                }
+                Sign::Plus => {
+                    // +self > -other/0
+                    if *other <= 0 {
+                        return Ordering::Greater;
+                    }
+                }
+                // has zero u64_digit sections so we need to special case
+                Sign::NoSign => return 0.cmp(other),
+            }
+
+            if self.bits() > 64 {
+                return if *other > 0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                };
+            }
+
+            // 0 < bits < 64, so we will get exactly one element here
+            let mag = self.iter_u64_digits().next().unwrap();
+
+            if *other >= 0 {
+                return mag.cmp(&(*other as u64));
+            }
+
+            // sign is negagive, reverse comparison order
+            other.unsigned_abs().cmp(&mag)
+        }
+        fn num_partial_cmp(&self, other: &i64) -> Option<Ordering> {
+            Some(self.num_cmp(other))
+        }
+    }
+
     impl NumOrd<f32> for BigUint {
         #[inline]
         fn num_partial_cmp(&self, other: &f32) -> Option<Ordering> {
@@ -322,7 +426,11 @@ mod _num_bigint {
             }
         }
     }
-    impl_ord_by_swap! { f32|BigInt; f32|BigUint; f64|BigInt; f64|BigUint; BigInt|BigUint; }
+    impl_ord_by_swap! {
+        i64|BigInt; u64|BigInt; i64|BigUint; u64|BigUint;
+        f32|BigInt; f32|BigUint; f64|BigInt; f64|BigUint;
+        BigInt|BigUint;
+    }
 }
 
 // FIXME: Implementations for templated numeric types are directly specialized, because there is no
